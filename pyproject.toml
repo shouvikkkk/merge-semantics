@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "merge-semantics"
+version = "0.1.0"
+description = "Post-merge semantic conflict checker for parallel coding agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+merge-semantics = "merge_semantics.cli:entry"
+
+[tool.setuptools.packages.find]
+include = ["merge_semantics*"]
