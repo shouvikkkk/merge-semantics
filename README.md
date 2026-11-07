@@ -38,8 +38,8 @@ contradicting changes.
 ## What it checks
 
 Given `--branch-a` and `--branch-b`, the tool computes their
-merge-base, diffs each branch against it, parses the Python files with
-`ast`, and reports:
+merge-base, diffs each branch against it, parses the code files, and
+reports:
 
 | Finding | Meaning |
 |---|---|
@@ -51,6 +51,22 @@ merge-base, diffs each branch against it, parses the Python files with
 
 Every finding carries its severity, the two branches involved,
 `file:line` evidence, and a plain-language explanation.
+
+## Languages
+
+Python files (`.py`) are parsed with `ast`. JavaScript and
+TypeScript files (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`) are
+parsed with a built-in tokenizer (no third-party parser), extracting
+the same surface: functions, classes, methods (qualified as
+`ClassName.method`, exactly like Python), top-level `const`/`let`/`var`
+bindings (arrow and function expressions count as functions),
+destructured bindings, and — for TypeScript — `interface`, `type`,
+`enum` and `namespace` declarations. References cover call callees,
+`new X`, `extends`/`implements` operands, import/export specifiers,
+member names after `.`, and JSX component names (capitalised tags
+only). All five finding kinds work across both languages, and a
+Python file and a JS file can contradict each other through a shared
+config key in the same check run.
 
 ## Setup
 
@@ -112,8 +128,23 @@ With `--format json` the same result is machine-readable: a
 
 ## Limitations (honest)
 
-* **Python only in v1.** Other languages are not parsed; their files
-  only participate in the registry/contract checks.
+* **JavaScript/TypeScript parsing is a tokenizer, not a parser.**
+  It handles the common shapes well, and the test suite pins the
+  edge cases, but it is not a full grammar: object-literal methods
+  (`const o = { m() {} }`) are not symbols; dynamic `import()`
+  targets are not followed; parameter properties
+  (`constructor(private x)`) are not fields; class members after a
+  semicolon-less field initializer (ASI) can be missed; and type
+  names in annotations (`let x: Widget`) are recorded as references,
+  so a removed value symbol sharing a type's name can produce a
+  false positive. TypeScript type-only references are not separated
+  from value references.
+* **Method renames are matched on the unqualified name.** Method
+  definitions are qualified (`Widget.render`) but call sites use the
+  bare name (`w.render()`), so a rename is claimed when the other
+  branch adds a call to the bare method name. A call to a same-named
+  method on a *different* class can therefore produce a false
+  positive; the finding names both branches so you can judge.
 * **Static AST analysis.** It reasons about names, not runtime
   behaviour: dynamic dispatch, `getattr` strings, monkey-patching and
   metaprogramming can hide a real conflict or suggest a spurious one.
