@@ -15,9 +15,26 @@ import re
 from collections import defaultdict
 
 from . import gitutil
+from .jssymbols import parse_js_file
 from .symbols import TreeSymbols, parse_file
 
 SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+# File extensions parsed for symbols.  Everything else only takes
+# part in the registry/contract checks.
+CODE_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+
+
+def _parse_code_file(path: str, content: str):
+    """Parse one code file with the right extractor for its language."""
+    if path.endswith(JS_EXTENSIONS):
+        return parse_js_file(path, content)
+    return parse_file(path, content)
+
+
+def _is_code_path(path: str) -> bool:
+    return path.endswith(CODE_EXTENSIONS)
 
 # Path fragments that mark a non-Python file as a shared registry:
 # route tables, URL maps, registries, feature-flag lists, blueprints.
@@ -33,9 +50,20 @@ _REGISTRY_MARKERS = (
 _REGISTRY_BASENAMES = {".env.example", ".env.sample", ".env.template"}
 
 
-def _word_in(text: str, name: str) -> bool:
-    """True if ``name`` appears in ``text`` as a standalone token."""
-    pattern = r"(?<![A-Za-z0-9_.])" + re.escape(name) + r"(?![A-Za-z0-9_])"
+def _word_in(text: str, name: str, allow_dot_prefix: bool = False) -> bool:
+    """True if ``name`` appears in ``text`` as a standalone token.
+
+    By default a preceding ``.`` disqualifies the match, so a method
+    call ``catalog.log()`` does not count as a call to a top-level
+    ``log``.  Callers matching the unqualified tail of a qualified
+    method name (``Widget.render`` -> ``render``) pass
+    ``allow_dot_prefix=True``, because method calls are written
+    ``obj.render()`` -- the dot is the normal case there, not noise.
+    """
+    if allow_dot_prefix:
+        pattern = r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])"
+    else:
+        pattern = r"(?<![A-Za-z0-9_.])" + re.escape(name) + r"(?![A-Za-z0-9_])"
     return re.search(pattern, text) is not None
 
 
@@ -130,10 +158,10 @@ class Snapshot:
         for ref in (self.base, branch_a, branch_b):
             tree = TreeSymbols()
             for path in gitutil.list_files(repo, ref):
-                if path.endswith(".py"):
+                if _is_code_path(path):
                     content = gitutil.file_content(repo, ref, path)
                     if content is not None:
-                        tree.add_file(parse_file(path, content))
+                        tree.add_file(_parse_code_file(path, content))
             self.trees[ref] = tree
         # Contents of every file either branch touched, at all three refs.
         touched = sorted(set(self.changed[branch_a]) | set(self.changed[branch_b]))
@@ -165,18 +193,41 @@ class Snapshot:
         Lines that merely *define* ``name`` do not count: without this
         filter, any branch that drops one function and adds another
         would look like a rename, because its added ``def`` line
-        contains the new name.
+        contains the new name.  The filter covers Python definitions
+        (``def``/``class``/assignment) and JavaScript/TypeScript ones
+        (``function``/``class``/``interface``/``type``/``enum``,
+        ``const``/``let``/``var`` bindings, and ``name(...) {`` method
+        definitions).
+
+        Method names are qualified (``ClassName.method``) in the symbol
+        tables, but call sites use the bare name (``obj.method()``), so
+        a qualified name is also matched on its unqualified tail, with
+        a ``.`` prefix allowed there (``w.render()`` is a call to the
+        tail ``render``).  That is a heuristic: a call to a same-named
+        method on another class can produce a false positive, and the
+        README says so.
         """
-        def_pattern = re.compile(
-            r"\s*(def|class)\s+" + re.escape(name) + r"\b"
-            r"|\s*" + re.escape(name) + r"\s*[:=]"
-        )
-        for path in self.changed[branch]:
-            for line in self.added_text[(branch, path)].splitlines():
-                if def_pattern.match(line):
-                    continue
-                if _word_in(line, name):
-                    return True
+        candidates = [(name, False)]
+        if "." in name:
+            candidates.append((name.rsplit(".", 1)[-1], True))
+        for candidate, allow_dot in candidates:
+            def_pattern = re.compile(
+                r"\s*(export\s+(default\s+)?)?"
+                r"(def|class|function|interface|type|enum)\s+"
+                + re.escape(candidate) + r"\b"
+                r"|\s*(export\s+)?(const|let|var)\s+"
+                + re.escape(candidate) + r"\s*="
+                r"|\s*" + re.escape(candidate) + r"\s*[:=]"
+                r"|\s*(async\s+|static\s+|get\s+|set\s+|public\s+|private\s+"
+                r"|protected\s+)?" + re.escape(candidate)
+                + r"\s*\([^)]*\)\s*\{"
+            )
+            for path in self.changed[branch]:
+                for line in self.added_text[(branch, path)].splitlines():
+                    if def_pattern.match(line):
+                        continue
+                    if _word_in(line, candidate, allow_dot):
+                        return True
         return False
 
     def added_config_keys(self, branch: str, path: str) -> set:
@@ -294,7 +345,7 @@ def detect(repo: str, branch_a: str, branch_b: str) -> list:
     common = sorted(
         p
         for p in set(snap.changed[branch_a]) & set(snap.changed[branch_b])
-        if not p.endswith(".py")
+        if not _is_code_path(p)
     )
     for path in common:
         added_a_lines = gitutil.added_lines(
